@@ -1,87 +1,94 @@
-import os
-import uuid
-from flask import Flask, request, jsonify, send_from_directory, send_file
-from werkzeug.utils import secure_filename
-import cv2
-import numpy as np
+import React, { useState } from "react";
+import axios from "axios";
+import { createRoot } from "react-dom/client";
+import express from "express";
+import multer from "multer";
+import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+import cv2 from "opencv4nodejs";
 
-app = Flask(__name__, static_folder='build', static_url_path='')
-UPLOAD_FOLDER = "uploads"
-RESULT_FOLDER = "results"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULT_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['RESULT_FOLDER'] = RESULT_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+const app = express();
+const upload = multer({ dest: "uploads/" });
+app.use(cors());
+app.use(express.static("public"));
 
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+fs.mkdirSync("uploads", { recursive: true });
+fs.mkdirSync("results", { recursive: true });
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+app.post("/upload", upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const filePath = req.file.path;
+    try {
+        const image = await cv2.imreadAsync(filePath);
+        const gray = await image.cvtColorAsync(cv2.COLOR_BGR2GRAY);
+        const edges = await gray.cannyAsync(50, 150);
+        const contours = await edges.findContoursAsync(cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE);
+        const outputFileName = `${Date.now()}.png`;
+        const outputFilePath = path.join("results", outputFileName);
+        await cv2.imwriteAsync(outputFilePath, image);
+        res.json({
+            message: "Analysis complete",
+            output_image: `/results/${outputFileName}`,
+            number_of_parts: contours.length,
+            detected_objects: ["Window", "Door", "Beam"]
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
-def enhance_image(image):
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    l = cv2.equalizeHist(l)
-    enhanced_image = cv2.merge([l, a, b])
-    return cv2.cvtColor(enhanced_image, cv2.COLOR_LAB2BGR)
+app.use("/results", express.static("results"));
+app.listen(5000, () => console.log("Server running on port 5000"));
 
-def detect_objects(image):
-    # Placeholder for a real object detection model
-    return [{"label": "Window", "confidence": 0.95}, {"label": "Door", "confidence": 0.90}, {"label": "Beam", "confidence": 0.85}]
+const FrontendApp = () => {
+    const [file, setFile] = useState(null);
+    const [imageUrl, setImageUrl] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [partsCount, setPartsCount] = useState(null);
+    const [detectedObjects, setDetectedObjects] = useState([]);
 
-def analyze_structure(image_path):
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError("Image not found.")
-    image = enhance_image(image)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    result = image.copy()
-    bounding_boxes = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        bounding_boxes.append({'x': x, 'y': y, 'width': w, 'height': h})
-        cv2.rectangle(result, (x, y), (x + w, y + h), (255, 0, 0), 2)
-    output_filename = f"{uuid.uuid4().hex}.png"
-    output_path = os.path.join(RESULT_FOLDER, output_filename)
-    cv2.imwrite(output_path, result)
-    objects_detected = detect_objects(image)
-    return output_filename, len(contours), bounding_boxes, objects_detected
+    const handleFileChange = (event) => setFile(event.target.files[0]);
 
-@app.route('/upload', methods=['POST'])
-def upload_image():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
-    if not allowed_file(file.filename):
-        return jsonify({"error": "File type not allowed"}), 400
-    filename = secure_filename(file.filename)
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(file_path)
-    try:
-        output_filename, parts_count, bounding_boxes, objects_detected = analyze_structure(file_path)
-        return jsonify({
-            "message": "Analysis complete",
-            "output_image": output_filename,
-            "number_of_parts": parts_count,
-            "bounding_boxes": bounding_boxes,
-            "detected_objects": objects_detected
-        })
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    const handleUpload = async () => {
+        if (!file) return;
+        setLoading(true);
+        const formData = new FormData();
+        formData.append("file", file);
+        try {
+            const response = await axios.post("http://localhost:5000/upload", formData, {
+                headers: { "Content-Type": "multipart/form-data" },
+            });
+            setImageUrl(response.data.output_image);
+            setPartsCount(response.data.number_of_parts);
+            setDetectedObjects(response.data.detected_objects);
+        } catch (error) {
+            console.error("Upload failed", error);
+        }
+        setLoading(false);
+    };
 
-@app.route('/results/<filename>')
-def get_result_image(filename):
-    return send_from_directory(RESULT_FOLDER, filename)
+    return (
+        <div className="container">
+            <h1>ArchVision AI - Structure Analysis</h1>
+            <input type="file" onChange={handleFileChange} />
+            <button onClick={handleUpload} disabled={loading || !file}>{loading ? "Processing..." : "Upload & Analyze"}</button>
+            {imageUrl && (
+                <div>
+                    <h2>Analysis Result</h2>
+                    <p>Detected Parts: {partsCount}</p>
+                    <p>Detected Objects: {detectedObjects.join(", ")}</p>
+                    <img src={imageUrl} alt="Processed" />
+                </div>
+            )}
+        </div>
+    );
+};
 
-# Serve React App
-@app.route('/')
-def serve():
-    return send_file(os.path.join(app.static_folder, 'index.html'))
+const container = document.getElementById("root");
+const root = createRoot(container);
+root.render(<FrontendApp />);
 
-if __name__ == "__main__":
-    app.run(debug=True)
